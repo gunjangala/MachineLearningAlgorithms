@@ -1,0 +1,58 @@
+#Install randForest Package
+install.packages("randomForest")
+library(randomForest)
+cell_data<-read.delim("T1_input.txt",header=TRUE)
+
+#Replace hyphens with underscores in gene names to avoid bugs in fitting procedure
+rownames(cell_data)<-gsub("-","_",rownames(cell_data))
+cell_data<-t(cell_data)
+
+#Should I add a conds column
+conds<-numeric(dim(cell_data)[1])
+
+#Make a vector to encode for the 6 different cell types
+Hyperdip_50<-grep("Hyperdip_50",rownames(cell_data))
+T_ALL<-grep("T_ALL",rownames(cell_data))
+TEL_AML1<-grep("TEL_AML1",rownames(cell_data))
+E2A_PBX1<-grep("E2A_PBX1",rownames(cell_data))
+BCR_ABL<-grep("BCR_ABL",rownames(cell_data))
+MLL<-grep("MLL",rownames(cell_data))
+
+conds[Hyperdip_50]<-0
+conds[T_ALL]<-1
+conds[TEL_AML1]<-2
+conds[E2A_PBX1]<-3
+conds[BCR_ABL]<-4
+conds[MLL]<-5
+
+#Change the conditions list to factor to use classification instead of regression
+conds<-as.factor(conds)
+
+#Run random forest model with all the data
+set.seed(1)
+#mtry_opt<-list()
+#for (i in 1:1000) {
+#for (i in 1:1239) {
+fit.cells=randomForest(conds[] ~.,data=cell_data[,],importance=TRUE,ntree=500)
+
+#Plot most important variables and print top 20 genes according to MeanDecreaseAccuracy
+#varImpPlot(fit.cells,pch=16,main="Variable Importance")
+#ndx<-order(fit.cells$importance[,7],decreasing=TRUE)
+#head(rownames(fit.cells$importance[ndx,]),n=20)
+
+#Choose minimum of out of bag error and return index
+#min_error_ntree<-which(fit.cells$err.rate==min(fit.cells$err.rate[,1]))
+#print(fit.cells$err.rate[min_error_ntree[1],1])
+#print(min_error_ntree)
+#mtry_opt[i]<-(fit.cells$err.rate[min_error_ntree[1],1])
+#}
+
+plot(1:1000,mtry_opt)
+
+#Plotting error vs # of trees
+plot(fit.cells$err.rate[,1],type="lines",ylab="Error Rate",xlab="Tree Number",lwd=3,col="darkred")
+
+#5-k cross-validation
+cv_results<-rfcv(trainx=cell_data,trainy=conds,cv.fold=5,step=0.75)
+plot(cv_results$n.var,cv_results$error.cv,pch=16,col="darkred",ylab="log(Error)",xlab="Number of Predictors")
+abline(v=30,lty=5,col="darkgray")

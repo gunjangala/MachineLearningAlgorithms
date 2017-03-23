@@ -1,0 +1,79 @@
+---
+title: "Random_Forest"
+author: "Farah"
+date: "November 18, 2016"
+output: html_document
+---
+```{r}
+#Install randForest Package
+install.packages("randomForest")
+library(randomForest)
+cell_data<-read.delim("T1_input.txt",header=TRUE)
+
+#Replace hyphens with underscores in gene names to avoid bugs in fitting procedure
+rownames(cell_data)<-gsub("-","_",rownames(cell_data))
+cell_data<-t(cell_data)
+
+#Should I add a conds column
+conds<-numeric(dim(cell_data)[1])
+
+#Make a vector to encode for the 6 different cell types
+Hyperdip_50<-grep("Hyperdip_50",rownames(cell_data))
+T_ALL<-grep("T_ALL",rownames(cell_data))
+TEL_AML1<-grep("TEL_AML1",rownames(cell_data))
+E2A_PBX1<-grep("E2A_PBX1",rownames(cell_data))
+BCR_ABL<-grep("BCR_ABL",rownames(cell_data))
+MLL<-grep("MLL",rownames(cell_data))
+
+conds[Hyperdip_50]<-0
+conds[T_ALL]<-1
+conds[TEL_AML1]<-2
+conds[E2A_PBX1]<-3
+conds[BCR_ABL]<-4
+conds[MLL]<-5
+
+#Change the conditions list to factor to use classification instead of regression
+conds<-as.factor(conds)
+
+#Run random forest model with all the data
+set.seed(1)
+fit.cells=randomForest(conds[] ~.,data=cell_data[,],importance=TRUE,ntree=1000)
+
+#Plot most important variables and print top 20 genes according to MeanDecreaseAccuracy
+varImpPlot(fit.cells,pch=16,main="Variable Importance",n.var=20)
+ndx<-order(fit.cells$importance[,7],decreasing=TRUE)
+
+fit.cells$importance[which(fit.cells$importance[,7]==max(fit.cells$importance[,7]))]
+
+most_imp_genes<-head(rownames(fit.cells$importance[ndx,]),n=20)
+
+fit.cells$importance[ndx,]
+
+#Plotting error vs # of trees
+plot(fit.cells$err.rate[,1],type="lines",ylab="Error Rate",xlab="Tree Number",lwd=3,col="darkred")
+
+#5-k cross-validation to test the effect of predictor number on model error
+cv_results<-rfcv(trainx=cell_data,trainy=conds,cv.fold=5,step=0.75)
+plot(cv_results$n.var,cv_results$error.cv,pch=16,col="darkred",ylab="Error",xlab="Number of Predictors")
+cv_min_ind<-which(cv_results$error.cv==min(cv_results$error.cv))
+
+#Mark regions of minimal error
+abline(v=cv_results$n.var[cv_min_ind],lty=5,col="darkgray")
+
+#Make a formula using the top 20 most important predictors
+imp_ind<-which(colnames(cell_data) %in% most_imp_genes)
+var_names<-paste(colnames(cell_data[,imp_ind]),collapse="+")
+rf.formula<-as.formula(paste("conds[]",var_names,sep="~"))
+
+#Fit a model using the top 20 selected predictors
+fit.cells_20=randomForest(rf.formula,data=cell_data[,],importance=TRUE,ntree=1000)
+plot(fit.cells_20$err.rate[,1],type="lines",ylab="Error Rate",xlab="Tree Number",lwd=3,col="darkred")
+#Use 1000 trees according to results from graph
+
+#Test different mtry 
+fit.cells_20=randomForest(rf.formula,data=cell_data[,],importance=TRUE,ntree=1000)
+tuneRF(cell_data[,imp_ind],conds,doBest=T,ntreeTry=1000,mtryStart=1)
+
+#Tuned mtry performs better than default
+
+```

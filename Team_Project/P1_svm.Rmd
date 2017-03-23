@@ -1,0 +1,199 @@
+---
+title: "P1 svm"
+output: html_document
+---
+```{r reading data,warning=FALSE,message=FALSE}
+library(pls)
+library(e1071)
+library(caret)
+require(kernlab)
+
+P1 <- read.delim("~/Google Drive/Machine Learning/Assignments/P1/Problem1_expressionMatrix.txt", header=TRUE)
+P1 <- as.data.frame(t(P1))
+P1$class <- (row.names(P1))
+P1$class <- substr(P1$class,0,3)
+P1$class <- as.factor(P1$class)
+
+P1$class <- sapply(P1$class, function(x) {
+  if (x=="T_A"){return ("T")}
+  else if (x=="TEL"){return ("TEL")}
+  else if (x=="Hyp"){return ("Hyperdip")}
+  else if (x=="E2A"){return ("E2A")}
+  else if (x=="MLL"){return ("MLL")}
+  else if (x=="BCR"){return ("BCR")}})
+
+P1$class <- as.factor(P1$class)
+x <- subset(P1,select=-class)
+y <- P1$class
+P1 <- as.data.frame(P1)
+rownames(P1) <- NULL
+```
+
+
+
+
+```{r svm function}
+svm.function <- function (kernel,data){
+  set.seed(100)
+  nsamples<-dim(data)[1]
+  sample <- data[sample(nrow(data),nsamples),]
+  ratio <- 0.7
+  train.samples <- ratio*nsamples
+  train.rows <- c(sample(nrow(sample), trunc(train.samples)))
+  train.set  <- sample[train.rows, ]
+  test.set   <- sample[-train.rows, ]
+  target <- P1$class
+  train.result <- train.set$class
+  test.result  <- test.set$class
+  formula <- as.formula(class ~ . )
+  set.seed(100)
+  # tunning hyperparameters
+  svm.tune.control <- tune.control(sampling = "cross", cross=5, best.model = TRUE,performances = TRUE)
+  train.x <- subset(train.set,select=-class)
+  train.y <- train.set$class
+  svmTune <- tune.svm(x=train.x,y=train.y,data=data,formula=(class~.),
+                      kernel=kernel, cost=10^(-10:3), 
+                      gamma=10^(-10:3),
+                      tunecontrol=svm.tune.control)
+  #modelusing parameters from earlier step
+  svm.model <- svm(formula, data = train.set, 
+                   kernel = kernel, 
+                   gamma = svmTune$best.parameters$gamma, 
+                   cost  = svmTune$best.parameters$cost)
+  train.pred <- predict(svm.model, train.set)
+  test.pred  <- predict(svm.model, test.set)
+  svm.table <- table(pred = test.pred, true = test.result)
+  cFm <- confusionMatrix(test.result,test.pred)
+  final <- cbind(round(svmTune$best.performance,5),noquote(paste(svmTune$best.parameters[1])),
+                 noquote(paste(svmTune$best.parameters[2])),as.numeric(cFm$overall[1]),
+                 svm.model$degree, svm.model$nu, svm.model$coef0,svm.model$tot.nSV)
+  final <- as.data.frame(final)
+  colnames(final) <- c("CVerror","cost","gamma","accuracy","degree","nu","coef0","SV")
+  #print(svmTune)
+  #print(svm.model)
+  print (cFm$table)
+  #print(cFm)
+  #print(final)
+  return(final)
+}
+
+
+svm.model <- function (kernel,data){
+  set.seed(100)
+  nsamples<-dim(data)[1]
+  sample <- data[sample(nrow(data),nsamples),]
+  ratio <- 0.7
+  train.samples <- ratio*nsamples
+  train.rows <- c(sample(nrow(sample), trunc(train.samples)))
+  train.set  <- sample[train.rows, ]
+  test.set   <- sample[-train.rows, ]
+  target <- P1$class
+  train.result <- train.set$class
+  test.result  <- test.set$class
+  formula <- as.formula(class ~ . )
+  set.seed(100)
+  # tunning hyperparameters
+  svm.tune.control <- tune.control(sampling = "cross", cross=5, best.model = TRUE,performances = TRUE)
+  train.x <- subset(train.set,select=-class)
+  train.y <- train.set$class
+  svmTune <- tune.svm(x=train.x,y=train.y,data=data,formula=(class~.),
+                      kernel=kernel, cost=10^(-10:3), 
+                      gamma=10^(-10:3),
+                      tunecontrol=svm.tune.control)
+  svm.model <- svm(formula, data = train.set, 
+                   kernel = kernel, 
+                   gamma = svmTune$best.parameters$gamma, 
+                   cost  = svmTune$best.parameters$cost)
+  return(svm.model)
+}
+```
+
+```{r}
+# running all to get best predictors from the entire dataset 
+set.seed(100)
+# setting control
+rfe.control<-rfeControl(method="cv",number=5,functions = caretFuncs,saveDetails=TRUE,
+                        rerank=TRUE,returnResamp="all",
+                        p=0.8)
+
+result.linear <- rfe(x,y, rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+result.radial <- rfe(x,y, rfeControl=rfe.control , method="svmRadial",metric="Accuracy",maximize=TRUE)
+result.polynomial <- rfe(x,y, rfeControl=rfe.control , method="svmPoly",metric="Accuracy",maximize=TRUE)
+```
+
+```{r svm linear all}
+linear.all <- svm.function("linear",P1)
+svm.model("linear",P1)
+```
+
+```{r svm radial all}
+radial.all <- svm.function("radial",P1)
+svm.model("radial",P1)
+```
+
+```{r svm polynomial all}
+poly.all <- svm.function("polynomial",P1)
+svm.model("polynomial",P1)
+```
+
+```{r}
+summary <- as.data.frame(rbind(linear.all,radial.all,poly.all))
+summary
+```
+
+Based on Cv error, we choose linear kernel.
+
+```{r svm linear 20}
+#top 20 genes
+result.linear$optVariables[1:20]
+linear.20 <- P1[,result.linear$optVariables[1:20]]
+x1 <- linear.20
+linear.20$class <- P1$class
+svm.linear.20 <- svm.function("linear",linear.20)
+svm.model("linear",linear.20)
+```
+
+
+```{r}
+set.seed(100)
+# setting control
+rfe.control<-rfeControl(method="cv",number=5,functions = caretFuncs,saveDetails=TRUE,
+                        rerank=TRUE,returnResamp="all",
+                        p=0.8)
+
+# trying out different kernels and a range of subset sizes
+result.linear <- rfe(x,y, sizes=c(seq(5,400,10)), rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+
+result.linear
+
+plot(result.linear$results$Variables,result.linear$results$Accuracy,xlab="#predictors",ylab="Accuracy",pch=18,main="Plot of #predictors vs accuracy (svm)",type="l",col="red")
+plot(result.linear$results$Variables,result.linear$results$Kappa,xlab="#predictors",ylab="kappa",pch=18,main="Plot of #predictors vs kappa (svm)",type="l",col="red")
+
+```
+
+The model with asterik is "*" is our best subset. 
+
+```{r}
+# all models between the best subset intervals from earlier results of variable selection
+result.linear.125.145 <- rfe(x,y, sizes=(seq(125,145)), rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+result.linear.125.145
+result.linear.125.145$bestSubset
+result.linear.125.145$optVariables[1:result.linear.125.145$bestSubset]
+
+linear.best <- P1[,result.linear.125.145$optVariables[1:result.linear.125.145$bestSubset]]
+x1 <- linear.best
+linear.best$class <- P1$class
+svm.linear.best <- svm.function("linear",linear.best)
+svm.model("linear",linear.best)
+```
+
+
+```{r cv C gamma}
+summary <- as.data.frame(rbind(linear.all,
+                               svm.linear.20,
+                               svm.linear.best))
+colnames(summary) <- c("CVerror","cost","gamma","accuracy","degree","nu","coef0")
+summary
+```
+
+Linear kernel gives lowest CV error and minimum cost. Best model using linear kernel in svm is with 130 predictors.

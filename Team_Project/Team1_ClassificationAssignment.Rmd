@@ -1,0 +1,392 @@
+---
+title: "Team1_ClassificationAssignment"
+output: html_document
+---
+
+```{r load-libraries, include = F}
+library(glmnet)
+library(gbm)
+library(reshape2)
+library(ggplot2)
+library(pls)
+library(e1071)
+library(caret)
+require(kernlab)
+library(randomForest)
+```
+
+```{r pre-process, cache = T}
+tumor.subtype <- read.csv("~/School/ml_stats/course_docs/Assignments/T1/Problem1_expressionMatrix.txt", 
+                          sep = '\t')
+# exclude ambiguous label
+tumor.subtype <- tumor.subtype[, !(colnames(tumor.subtype) %in% c("BCR_ABL_Hyperdip_.10"))]
+# remove hyphen from gene names
+rownames(tumor.subtype)<-gsub("-","_",rownames(tumor.subtype))
+prefix <- strsplit(colnames(tumor.subtype), "_", fixed = TRUE)
+prefix <- sapply(prefix, FUN = function(x) {x[1]})
+subtype.dict <- c("T_ALL", "TEL_AML1", "Hyperdip", "MLL", "E2A_PBX1", "BCR_ABL")
+names(subtype.dict) <- c("T", "TEL", "Hyperdip", "MLL", "E2A", "BCR")
+subtype <- subtype.dict[prefix]
+tumor.subtype <- t(as.matrix(tumor.subtype))
+```
+
+## Mulitnomial Logistic Regression
+
+For multinomial logistic regression, I chose to use an elastic net approach to regularize the final model. There are two important parameters here, lambda and alpha. Alpha controls the elastic net, or the balance between ridge regression (alpha = 0) and lasso (alpha = 1). Lambda controls the overall strength of the penalty. The Glmnet package was chosen for its implementation of multinomial elastic net. The FitMLR function below does the model selection using the cv.glmnet() function. This function performs k-fold cross validation for the given model over a range of lambda's and calculates useful statistics like the cross-validation error. From this, you can find the value of lambda that minimizes the cross-validation error at the specified alpha. To find alpha, this procedure was run over a range of values from 0-1 and the alpha that gave the model with the lowest error was chosen as the "best model". It was important here to set the folds before looping over alpha as otherwise the function would randomize the folds every iteration and make comparison difficult. Another useful parameter in the glmnet() function is dfmax which is the maximum number of model parameters. This can be tuned to give the best model with 20 parameters as was done below.  
+
+```{r fit-model, warning = F, cache = T}
+PlotCVE <- function(cve, x){
+  plot(x, cve, xlab = "alpha", ylab = "Cross Validation Error")
+}
+
+FitMLR <- function(data.use, classes, nfold, dfmax = NULL, plot.cve = FALSE){
+  set.seed(42)
+  # determine best value of alpha 
+  folds <- sample(rep(1:nfold, ceiling(nrow(data.use) / nfold))[1:nrow(data.use)])
+  model.list <- vector("list", 11)
+  for (i in seq(0, 1, 0.1)) {
+    if (i == 0 && !is.null(dfmax)) i <- 0.01
+    model.cv.fit <- cv.glmnet(data.use, classes, family = "multinomial", alpha = i, nfolds = nrow(data.use), foldid = folds, parallel = T, dfmax = dfmax)
+    if(i == 0.01) i <- 0
+    model.list[[(i + 0.1) * 10]] <- model.cv.fit
+  }
+  min.cve <- numeric()
+  for (i in 1:length(model.list)) {
+    min.cve <- c(min.cve, min(model.list[[i]]$cvm))
+  }
+  if(plot.cve) PlotCVE(min.cve, seq(0,1,0.1))
+  best.model <- model.list[[which.min(min.cve)]]
+  return(best.model)
+}
+```
+
+```{r, lr-output}
+best.model <- FitMLR(data.use = tumor.subtype, classes = subtype, nfold = 10)
+best20.model <- FitMLR(data.use = tumor.subtype, classes = subtype, nfold = 10, dfmax = 22)
+
+PrintNonZeroPredictors <- function(model, nrow){
+  coefs <- do.call(cbind, coef(model))
+  rows.to.keep <- unique(which(coefs != 0, arr.ind = T)[, 1])
+  parameters <- coefs[rows.to.keep, ]
+  colnames(parameters) <- names(coef(model))
+  if(missing(nrow)) print(parameters)
+  else print(head(parameters, nrow))
+}
+PrintNonZeroPredictors(best.model, nrow = 20)
+top20.lr.features <- rownames(PrintNonZeroPredictors(best20.model))[-1]
+plot(best.model)
+plot(best20.model)
+# to predict new data
+# predict(best.model, newx = new.data, s = "lambda.min", type = "class")
+```
+
+## Random Forests
+
+```{r random-forests}
+#Run random forest model with all the data
+set.seed(1)
+rf.tumor.subtype <- tumor.subtype
+rf.subtype <- factor(subtype )
+fit.cells <- randomForest(rf.subtype ~ . ,data = rf.tumor.subtype, importance=TRUE,ntree=1000)
+
+#Plot most important variables and print top 20 genes according to MeanDecreaseAccuracy
+varImpPlot(fit.cells,pch=16,main="Variable Importance",n.var=20)
+ndx<-order(fit.cells$importance[,7],decreasing=TRUE)
+
+fit.cells$importance[which(fit.cells$importance[,7]==max(fit.cells$importance[,7]))]
+most_imp_genes<-head(rownames(fit.cells$importance[ndx,]),n=20)
+fit.cells$importance[ndx,]
+
+#Plotting error vs # of trees
+plot(fit.cells$err.rate[,1],type="lines",ylab="Error Rate",xlab="Tree Number",lwd=3,col="darkred")
+
+#5-k cross-validation to test the effect of predictor number on model error
+cv_results<-rfcv(trainx=rf.tumor.subtype, trainy=rf.subtype,cv.fold=5,step=0.75)
+plot(cv_results$n.var,cv_results$error.cv,pch=16,col="darkred",ylab="Error",xlab="Number of Predictors")
+cv_min_ind<-which(cv_results$error.cv==min(cv_results$error.cv))
+
+#Mark regions of minimal error
+abline(v=cv_results$n.var[cv_min_ind],lty=5,col="darkgray")
+
+#Make a formula using the top 20 most important predictors
+imp_ind<-which(colnames(rf.tumor.subtype) %in% most_imp_genes)
+var_names<-paste(colnames(rf.tumor.subtype[,imp_ind]),collapse="+")
+rf.formula<-as.formula(paste("rf.subtype", var_names,sep="~"))
+
+#Fit a model using the top 20 selected predictors
+fit.cells_20=randomForest(rf.formula,data=rf.tumor.subtype,importance=TRUE,ntree=1000)
+plot(fit.cells_20$err.rate[,1],type="lines",ylab="Error Rate",xlab="Tree Number",lwd=3,col="darkred")
+#Use 1000 trees according to results from graph
+
+#Test different mtry 
+fit.cells_20=randomForest(rf.formula,data=rf.tumor.subtype,importance=TRUE,ntree=1000)
+tuneRF(rf.tumor.subtype[,imp_ind],rf.subtype,doBest=T,ntreeTry=1000,mtryStart=1)
+
+#Tuned mtry performs better than default
+
+top20.rf.features <- most_imp_genes
+```
+
+## SVMs
+
+
+```{r svm function}
+svm.function <- function (kernel,data){
+  set.seed(100)
+  nsamples<-dim(data)[1]
+  sample <- data[sample(nrow(data),nsamples),]
+  ratio <- 0.7
+  train.samples <- ratio*nsamples
+  train.rows <- c(sample(nrow(sample), trunc(train.samples)))
+  train.set  <- sample[train.rows, ]
+  test.set   <- sample[-train.rows, ]
+  target <- P1$class
+  train.result <- train.set$class
+  test.result  <- test.set$class
+  formula <- as.formula(class ~ . )
+  set.seed(100)
+  # tunning hyperparameters
+  svm.tune.control <- tune.control(sampling = "cross", cross=5, best.model = TRUE,performances = TRUE)
+  train.x <- subset(train.set,select=-class)
+  train.y <- train.set$class
+  svmTune <- tune.svm(x=train.x,y=train.y,data=data,formula=(class~.),
+                      kernel=kernel, cost=10^(-10:3), 
+                      gamma=10^(-10:3),
+                      tunecontrol=svm.tune.control)
+  #modelusing parameters from earlier step
+  svm.model <- svm(formula, data = train.set, 
+                   kernel = kernel, 
+                   gamma = svmTune$best.parameters$gamma, 
+                   cost  = svmTune$best.parameters$cost)
+  train.pred <- predict(svm.model, train.set)
+  test.pred  <- predict(svm.model, test.set)
+  svm.table <- table(pred = test.pred, true = test.result)
+  cFm <- confusionMatrix(test.result,test.pred)
+  final <- cbind(round(svmTune$best.performance,5),noquote(paste(svmTune$best.parameters[1])),
+                 noquote(paste(svmTune$best.parameters[2])),as.numeric(cFm$overall[1]),
+                 svm.model$degree, svm.model$nu, svm.model$coef0,svm.model$tot.nSV)
+  final <- as.data.frame(final)
+  colnames(final) <- c("CVerror","cost","gamma","accuracy","degree","nu","coef0","SV")
+  #print(svmTune)
+  #print(svm.model)
+  print (cFm$table)
+  #print(cFm)
+  #print(final)
+  return(final)
+}
+
+
+svm.model <- function (kernel,data){
+  set.seed(100)
+  nsamples<-dim(data)[1]
+  sample <- data[sample(nrow(data),nsamples),]
+  ratio <- 0.7
+  train.samples <- ratio*nsamples
+  train.rows <- c(sample(nrow(sample), trunc(train.samples)))
+  train.set  <- sample[train.rows, ]
+  test.set   <- sample[-train.rows, ]
+  target <- P1$class
+  train.result <- train.set$class
+  test.result  <- test.set$class
+  formula <- as.formula(class ~ . )
+  set.seed(100)
+  # tunning hyperparameters
+  svm.tune.control <- tune.control(sampling = "cross", cross=5, best.model = TRUE,performances = TRUE)
+  train.x <- subset(train.set,select=-class)
+  train.y <- train.set$class
+  svmTune <- tune.svm(x=train.x,y=train.y,data=data,formula=(class~.),
+                      kernel=kernel, cost=10^(-10:3), 
+                      gamma=10^(-10:3),
+                      tunecontrol=svm.tune.control)
+  svm.model <- svm(formula, data = train.set, 
+                   kernel = kernel, 
+                   gamma = svmTune$best.parameters$gamma, 
+                   cost  = svmTune$best.parameters$cost)
+  return(svm.model)
+}
+```
+
+```{r}
+P1 <- as.data.frame(tumor.subtype)
+P1$class <- as.factor(subtype)
+x <- tumor.subtype
+y <- as.factor(subtype)
+rownames(P1) <- NULL
+
+# running all to get best predictors from the entire dataset 
+set.seed(100)
+# setting control
+rfe.control<-rfeControl(method="cv",number=5,functions = caretFuncs,saveDetails=TRUE,
+                        rerank=TRUE,returnResamp="all",
+                        p=0.8)
+
+result.linear <- rfe(x,y, rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+result.radial <- rfe(x,y, rfeControl=rfe.control , method="svmRadial",metric="Accuracy",maximize=TRUE)
+result.polynomial <- rfe(x,y, rfeControl=rfe.control , method="svmPoly",metric="Accuracy",maximize=TRUE)
+```
+
+```{r svm linear all}
+linear.all <- svm.function("linear",P1)
+svm.model("linear",P1)
+```
+
+```{r svm radial all}
+radial.all <- svm.function("radial",P1)
+svm.model("radial",P1)
+```
+
+```{r svm polynomial all}
+poly.all <- svm.function("polynomial",P1)
+svm.model("polynomial",P1)
+```
+
+```{r}
+summary <- as.data.frame(rbind(linear.all,radial.all,poly.all))
+summary
+```
+
+Based on Cv error, we choose linear kernel.
+
+```{r svm linear 20}
+#top 20 genes
+result.linear$optVariables[1:20]
+linear.20 <- P1[,result.linear$optVariables[1:20]]
+x1 <- linear.20
+linear.20$class <- P1$class
+svm.linear.20 <- svm.function("linear",linear.20)
+svm.model("linear",linear.20)
+```
+
+
+```{r}
+set.seed(100)
+# setting control
+rfe.control<-rfeControl(method="cv",number=5,functions = caretFuncs,saveDetails=TRUE,
+                        rerank=TRUE,returnResamp="all",
+                        p=0.8)
+
+# trying out different kernels and a range of subset sizes
+result.linear <- rfe(x,y, sizes=c(seq(5,400,10)), rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+
+result.linear
+
+plot(result.linear$results$Variables,result.linear$results$Accuracy,xlab="#predictors",ylab="Accuracy",pch=18,main="Plot of #predictors vs accuracy (svm)",type="l",col="red")
+plot(result.linear$results$Variables,result.linear$results$Kappa,xlab="#predictors",ylab="kappa",pch=18,main="Plot of #predictors vs kappa (svm)",type="l",col="red")
+
+```
+
+The model with asterik is "*" is our best subset. 
+
+```{r}
+# all models between the best subset intervals from earlier results of variable selection
+result.linear.125.145 <- rfe(x,y, sizes=(seq(125,145)), rfeControl=rfe.control , method="svmLinear",metric="Accuracy",maximize=TRUE)
+result.linear.125.145
+result.linear.125.145$bestSubset
+result.linear.125.145$optVariables[1:result.linear.125.145$bestSubset]
+
+linear.best <- P1[,result.linear$optVariables[1:result.linear.125.145$bestSubset]]
+x1 <- linear.best
+linear.best$class <- P1$class
+svm.linear.best <- svm.function("linear",linear.best)
+svm.model("linear",x1,y,linear.best)
+```
+
+
+```{r cv C gamma}
+summary <- as.data.frame(rbind(linear.all,
+                               svm.linear.20,
+                               svm.linear.best))
+colnames(summary) <- c("CVerror","cost","gamma","accuracy","degree","nu","coef0")
+summary
+```
+
+Linear kernel gives lowest CV error and minimum cost. Best model using linear kernel in svm is with 130 predictors.
+
+## Gradient Boosted Machines
+To implement gradient boosted machines in R, we chose the gbm package. The important parameters to set in this model are the number of trees to grow, the depth of each tree, the learning rate, and the subsampling rate. We chose to keep the depth of the trees at 1 so that it was a purely additive model for ease of interpretation. Adding depth may make for a more sophisticated model but at the cost of interpretability. 
+
+```{r, gbm-fit}
+gbm.tumor.subtype <- as.data.frame(tumor.subtype)
+gbm.tumor.subtype$subtype <- subtype
+# determine optimal shrinkage parameter
+cv.error <- numeric()
+for (i in seq(0.001, 0.01, 0.001)){
+  gbm.model <- gbm(subtype ~ ., data = gbm.tumor.subtype, distribution = "multinomial", n.trees = 1000, shrinkage = i, cv.folds = 5)
+  cv.error <- c(cv.error, min(gbm.model$cv.error))
+}
+plot(cv.error ~ seq(0.001, 0.01, 0.001), xlab = "shrinkage parameter", ylab = "CV error")
+opt.shrinkage <- seq(0.001, 0.01, 0.001)[which.min(cv.error)]
+# gbm.perf computes iteration estimate (method == "OOB", "cv")
+gbm.perf(gbm.model, method = "OOB", oobag.curve = T)
+ntrees <- gbm.perf(gbm.model, method = "cv", overlay = T)
+gbm.model <- gbm(subtype ~ ., data = gbm.tumor.subtype, distribution = "multinomial", n.trees = ntrees , shrinkage = opt.shrinkage, cv.folds = 5)
+```
+
+
+```{r, gbm-results}
+top20.gbm.features <- summary(gbm.model, cBars = 20, order = T, las = 1)[1:20, 1]
+for (i in top20.gbm.features ){
+  data <- as.data.frame(as.matrix(plot(gbm.model, i.var = i, type = "response", return = T)))
+    data <- melt(data, id = i)
+    
+  ggplot(data, aes(x = eval(parse(text = i)), y = value, color = variable)) + geom_line() +
+    labs(x = i, y = "Predicted class probability")
+}
+```
+
+
+```{r cv-model-selection, cache = T}
+CalcCE <- function(predictions, classes){
+    return(1 - length(which(predictions == classes)) / length(classes))
+}
+
+nfolds <- 10
+# split data into n groups
+set.seed(42)
+obs <- sample(1:nrow(tumor.subtype))
+groups <- split(obs, ceiling(seq_along(obs)/(length(obs)/nfolds)))
+lr.error <- numeric()
+gbm.error <- numeric()
+rf.error <- numeric()
+svm.error <- numeric()
+for (i in 1:nfolds) {
+  # split data into training/test
+  data.train <- tumor.subtype[-groups[[i]], ]
+  data.test <- tumor.subtype[groups[[i]], ]
+  # fit models on training data, predict on test data
+  lr.data.train <- data.train[, top20.lr.features]
+  lr.model <- FitMLR(data.use = lr.data.train, classes = subtype[-groups[[i]]], nfold = 10)
+  lr.predictions <- predict(lr.model, newx = data.test[, top20.lr.features], s = "lambda.min", type = "class")
+  
+  rf.data.train <- data.train[, top20.rf.features]
+  rf.train.subtype <- rf.subtype[-groups[[i]]]
+  rf.train.formula<-as.formula(paste("rf.train.subtype", var_names,sep="~"))
+  rf.model <- randomForest(rf.train.formula, data=rf.data.train,importance=TRUE,ntree=1000, mtry=4)
+  rf.predictions <- predict(rf.model, data.test[, top20.rf.features])
+
+  linear.20 <-  gsub("-","_",result.linear$optVariables[1:20])
+  svm.data.train <- as.data.frame(data.train[, linear.20])
+  svm.data.train$class <- as.factor(subtype[-groups[[i]]])
+  svm.model.out <- svm.model("linear", svm.data.train)
+  svm.predictions <- predict(svm.model.out, data.test[, linear.20])
+  
+  gbm.data.train <- as.data.frame(data.train)[, top20.gbm.features]
+  gbm.data.train$subtype <- subtype[-groups[[i]]]
+  gbm.data.test <- as.data.frame(data.test)
+  gbm.model <- gbm(subtype ~ ., data = gbm.data.train, distribution = "multinomial", n.trees = ntrees, shrinkage = 0.007, cv.folds = 5)
+  gbm.predictions <- predict(gbm.model, newdata = gbm.data.test, type = "response")
+  gbm.predictions <- colnames(gbm.predictions)[apply(gbm.predictions, MARGIN = 1, which.max)]
+  # calculate the classification error
+  test.classes <- subtype[groups[[i]]]
+  svm.error <- c(svm.error, CalcCE(svm.predictions, test.classes))
+  rf.error <-c(rf.error, CalcCE(rf.predictions, test.classes))
+  lr.error <- c(lr.error, CalcCE(lr.predictions, test.classes))
+  gbm.error <- c(gbm.error, CalcCE(gbm.predictions, test.classes))
+  svm.error <- c(svm.error, CalcCE(svm.predictions, test.classes))
+
+}
+mean(svm.error)
+mean(rf.error)
+mean(lr.error)
+mean(gbm.error)
+```

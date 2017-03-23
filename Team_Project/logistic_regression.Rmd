@@ -1,0 +1,103 @@
+---
+title: "Logistic Regression"
+author: "Andrew Butler"
+date: "11/15/2016"
+output: html_document
+---
+
+```{r load-libraries, include = F}
+library(glmnet)
+library(gbm)
+library(reshape2)
+```
+
+```{r pre-process, cache = T}
+tumor.subtype <- read.csv("~/School/ml_stats/course_docs/Assignments/T1/Problem1_expressionMatrix.txt", 
+                          sep = '\t')
+# exclude ambiguous label
+tumor.subtype <- tumor.subtype[, !(colnames(tumor.subtype) %in% c("BCR_ABL_Hyperdip_.10"))]
+prefix <- strsplit(colnames(tumor.subtype), "_", fixed = TRUE)
+prefix <- sapply(prefix, FUN = function(x) {x[1]})
+subtype.dict <- c("T_ALL", "TEL_AML1", "Hyperdip", "MLL", "E2A_PBX1", "BCR_ABL")
+names(subtype.dict) <- c("T", "TEL", "Hyperdip", "MLL", "E2A", "BCR")
+subtype <- subtype.dict[prefix]
+tumor.subtype <- t(as.matrix(tumor.subtype))
+```
+
+For multinomial logistic regression, I chose to use an elastic net approach to regularize the final model. There are two important parameters here, lambda and alpha. Alpha controls the elastic net, or the balance between ridge regression (alpha = 0) and lasso (alpha = 1). Lambda controls the overall strength of the penalty. The Glmnet package was chosen for its implementation of multinomial elastic net. The FitMLR function below does the model selection using the cv.glmnet() function. This function performs k-fold cross validation for the given model over a range of lambda's and calculates useful statistics like the cross-validation error. From this, you can find the value of lambda that minimizes the cross-validation error at the specified alpha. To find alpha, this procedure was run over a range of values from 0-1 and the alpha that gave the model with the lowest error was chosen as the "best model". It was important here to set the folds before looping over alpha as otherwise the function would randomize the folds every iteration and make comparison difficult. Another useful parameter in the glmnet() function is dfmax which is the maximum number of model parameters. This can be tuned to give the best model with 20 parameters as was done below.  
+
+```{r fit-model, warning = F, cache = T}
+PlotCVE <- function(cve){
+  x <- seq(0, 1, 0.1)
+  plot(x, cve, xlab = "alpha", ylab = "Cross Validation Error")
+}
+
+FitMLR <- function(data.use, classes, nfold, dfmax = NULL, plot.cve = FALSE){
+  set.seed(42)
+  # determine best value of alpha 
+  folds <- sample(rep(1:nfold, ceiling(nrow(data.use) / nfold))[1:nrow(data.use)])
+  model.list <- vector("list", 11)
+  for (i in seq(0, 1, 0.1)) {
+    if (i == 0 && !is.null(dfmax)) i <- 0.01
+    model.cv.fit <- cv.glmnet(data.use, classes, family = "multinomial", alpha = i, nfolds = nrow(data.use), foldid = folds, parallel = T, dfmax = dfmax)
+    if(i == 0.01) i <- 0
+    model.list[[(i + 0.1) * 10]] <- model.cv.fit
+  }
+  min.cve <- numeric()
+  for (i in 1:length(model.list)) {
+    min.cve <- c(min.cve, min(model.list[[i]]$cvm))
+  }
+  if(plot.cve) PlotCVE(min.cve)
+  best.model <- model.list[[which.min(min.cve)]]
+  return(best.model)
+}
+best.model <- FitMLR(data.use = tumor.subtype, classes = subtype, nfold = 10)
+best20.model <- FitMLR(data.use = tumor.subtype, classes = subtype, nfold = 10, dfmax = 28, plot.cve = T)
+```
+
+```{r, output}
+PrintNonZeroPredictors <- function(model, nrow){
+  coefs <- do.call(cbind, coef(model))
+  rows.to.keep <- unique(which(coefs != 0, arr.ind = T)[, 1])
+  parameters <- coefs[rows.to.keep, ]
+  colnames(parameters) <- names(coef(model))
+  if(missing(nrow)) print(parameters)
+  else print(head(parameters, nrow))
+}
+PrintNonZeroPredictors(best.model, nrow = 20)
+PrintNonZeroPredictors(best20.model)
+
+# to predict new data
+# predict(best.model, newx = new.data, s = "lambda.min", type = "class")
+```
+
+```{r, lr-figures}
+plot(best.model)
+plot(best20.model)
+```
+
+To implement gradient boosted machines in R, we chose the gbm package. The important parameters to set in this model are the number of trees to grow, the depth of each tree, the learning rate, and the shrinkage parameter.  
+
+```{r, gbm-fit}
+tumor.subtype <- as.data.frame(tumor.subtype)
+tumor.subtype$subtype <- subtype
+# determine optimal shrinkage parameter
+
+gbm.model <- gbm(subtype ~ ., data = tumor.subtype, distribution = "multinomial", n.trees = 1000, shrinkage = 0.01, cv.folds = 5)
+# gbm.perf computes iteration estimate (method == "OOB", "cv")
+gbm.perf(gbm.model, method = "OOB")
+gbm.perf(gbm.model, method = "cv")
+gbm.model <- gbm(subtype ~ ., data = tumor.subtype, distribution = "multinomial", n.trees = 450, shrinkage = 0.01, cv.folds = 5)
+```
+
+
+```{r, gbm-results}
+top20.features <- summary(gbm.model, cBars = 20, order = T, las = 1)[1:20,]
+for (i in top20.features$var){
+  data <- as.data.frame(as.matrix(plot(gbm.model, i.var = i, type = "response", return = T)))
+    data <- melt(data, id = i)
+  ggplot(data, aes(x = eval(parse(text = i)), y = value, color = variable)) + geom_line() +
+    labs(x = i, y = "Predicted class probability")
+}
+```
+
